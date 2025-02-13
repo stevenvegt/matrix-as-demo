@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>WebSocket Messages</title>
+        <style>
+        #messages {
+            width: 100%;
+            max-width: 600px;
+            height: 400px;
+            overflow-y: auto;
+            border: 1px solid #ccc;
+            margin: 20px 0;
+            padding: 10px;
+        }
+        </style>
+    </head>
+    <body>
+        <div id="messages"></div>
+        <input type="text" id="messageInput" placeholder="Type a message...">
+        <button onclick="sendMessage()">Send</button>
+        <script>
+        const messagesDiv = document.getElementById('messages');
+        const messageInput = document.getElementById('messageInput');
+        const ws = new WebSocket('ws://' + window.location.host + '/ws');
+
+        function sendMessage() {
+            if (messageInput.value) {
+                ws.send(messageInput.value);
+                messageInput.value = '';
+            }
+        }
+
+        // Send message when Enter key is pressed
+        messageInput.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+
+        ws.onmessage = function(event) {
+            const message = document.createElement('div');
+            message.textContent = event.data;
+            messagesDiv.appendChild(message);
+            // Auto-scroll to bottom
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        };
+
+        ws.onclose = function() {
+            const message = document.createElement('div');
+            message.style.color = 'red';
+            message.textContent = 'Connection closed';
+            messagesDiv.appendChild(message);
+        };
+
+        ws.onerror = function(error) {
+            const message = document.createElement('div');
+            message.style.color = 'red';
+            message.textContent = 'Error: ' + error.message;
+            messagesDiv.appendChild(message);
+        };
+        </script>
+    </body>
+</html>
