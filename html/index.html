@@ -3,25 +3,113 @@
     <head>
         <title>WebSocket Messages</title>
         <style>
-        #messages {
-            width: 100%;
-            max-width: 600px;
-            height: 400px;
-            overflow-y: auto;
-            border: 1px solid #ccc;
-            margin: 20px 0;
-            padding: 10px;
-        }
+          .container {
+              max-width: 900px;
+              margin: 0 auto;
+              padding: 20px;
+              display: grid;
+              grid-template-columns: 250px 1fr;
+              gap: 20px;
+          }
+
+          .rooms {
+              background: #f5f5f5;
+              padding: 15px;
+              border-radius: 8px;
+          }
+
+          .room-item {
+              padding: 10px;
+              margin: 5px 0;
+              background: white;
+              border-radius: 4px;
+              cursor: pointer;
+              transition: background-color 0.2s;
+          }
+
+          .room-item:hover {
+              background: #e9ecef;
+          }
+
+          #messages {
+              width: 100%;
+              height: 400px;
+              overflow-y: auto;
+              border: 1px solid #e0e0e0;
+              border-radius: 8px;
+              margin: 20px 0;
+              padding: 15px;
+              background: white;
+          }
+
+          .chat {
+              background: #f8f9fa;
+              padding: 20px;
+              border-radius: 8px;
+          }
+
+          #messageInput {
+              width: calc(100% - 80px);
+              padding: 10px;
+              border: 1px solid #ddd;
+              border-radius: 4px;
+              margin-right: 10px;
+          }
+
+          button {
+              padding: 10px 20px;
+              background: #007bff;
+              color: white;
+              border: none;
+              border-radius: 4px;
+              cursor: pointer;
+          }
+
+          button:hover {
+              background: #0056b3;
+          }
+
+          .hidden {
+              display: none;
+          }
+
+          /* Message styles */
+          #messages div {
+              padding: 8px;
+              margin: 5px 0;
+              background: #e9ecef;
+              border-radius: 4px;
+          }
+
+          #messages div[style*="color: red"] {
+              background: #ffe6e6;
+          }
         </style>
     </head>
     <body>
-        <div id="messages"></div>
-        <input type="text" id="messageInput" placeholder="Type a message...">
-        <button onclick="sendMessage()">Send</button>
+        <div class="container">
+            <div class="rooms">
+                <h2>Rooms</h2>
+                <div id="roomList">
+                    {{ range .Rooms }}
+                    <div class="room-item" data-room-id="{{.ID}}" onclick="joinRoom({{.ID}})">{{.Name}}</div>
+                    {{ end }}
+                </div>
+            </div>
+            <div class="chat hidden" id="chatContainer">
+                <h2 id="roomName"></h2>
+                <div id="messages"></div>
+                <div>
+                    <input type="text" id="messageInput" placeholder="Type a message...">
+                    <button onclick="sendMessage()">Send</button>
+                </div>
+            </div>
+        </div>
         <script>
         const messagesDiv = document.getElementById('messages');
         const messageInput = document.getElementById('messageInput');
-        const ws = new WebSocket('ws://' + window.location.host + '/ws');
+        let ws = null;
+        let currentRoom = null;
 
         function sendMessage() {
             if (messageInput.value) {
@@ -37,27 +125,102 @@
             }
         });
 
-        ws.onmessage = function(event) {
-            const message = document.createElement('div');
-            message.textContent = event.data;
-            messagesDiv.appendChild(message);
-            // Auto-scroll to bottom
-            messagesDiv.scrollTop = messagesDiv.scrollHeight;
-        };
+        // ws.onmessage = function(event) {
+        //     const message = document.createElement('div');
+        //     message.textContent = event.data;
+        //     messagesDiv.appendChild(message);
+        //     // Auto-scroll to bottom
+        //     messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        // };
+        //
+        // ws.onclose = function() {
+        //     const message = document.createElement('div');
+        //     message.style.color = 'red';
+        //     message.textContent = 'Connection closed';
+        //     messagesDiv.appendChild(message);
+        // };
+        //
+        // ws.onerror = function(error) {
+        //     const message = document.createElement('div');
+        //     message.style.color = 'red';
+        //     message.textContent = 'Error: ' + error.message;
+        //     messagesDiv.appendChild(message);
+        // };
 
-        ws.onclose = function() {
-            const message = document.createElement('div');
-            message.style.color = 'red';
-            message.textContent = 'Connection closed';
-            messagesDiv.appendChild(message);
-        };
+      function connectToRoom(roomName) {
+          let thisRoom = roomName;
+          // Create WebSocket connection
+          ws = new WebSocket(`ws://${window.location.host}/ws/${roomName}`);
+          // ws = new WebSocket(`ws://${window.location.host}/ws`);
+          
+          ws.onmessage = (event) => {
+              const message = JSON.parse(event.data);
+              addMessage(message.body, message.user);
+          };
 
-        ws.onerror = function(error) {
-            const message = document.createElement('div');
-            message.style.color = 'red';
-            message.textContent = 'Error: ' + error.message;
-            messagesDiv.appendChild(message);
-        };
+          ws.onerror = (error) => {
+              addMessage('WebSocket error occurred', 'system', 'error');
+          };
+
+          ws.onclose = () => {
+            if (currentRoom === thisRoom) {
+              addMessage('Disconnected from room', 'system', 'system');
+            }
+          };
+        }
+
+        function addMessage(message, user = 'system', type = 'message') {
+            const messageElement = document.createElement('div');
+            messageElement.textContent = message;
+            
+            if (user === 'system') {
+                messageElement.style.color = 'blue';
+            } else if (type === 'error') {
+                messageElement.style.color = 'red';
+          } else if (type === 'message') {
+            userElement = document.createElement('span');
+            userElement.style.fontWeight = 'bold';
+            userElement.style.marginRight = '5px';
+            userElement.style.color = 'green';
+            userElement.textContent = user + ': ';
+            messageElement.prepend(userElement);
+          }
+            
+            messages.appendChild(messageElement);
+            messages.scrollTop = messages.scrollHeight;
+        }
+
+        function joinRoom(roomName) {
+            if (currentRoom === roomName) {
+                return;
+            }
+
+            // Clear previous room selection
+            document.querySelectorAll('.room-item').forEach(room => {
+                room.style.backgroundColor = 'white';
+            });
+
+            // Highlight selected room
+            event.target.style.backgroundColor = '#e9ecef';
+            
+            // Close previous WebSocket connection if it exists
+            if (ws) {
+                ws.close();
+            }
+
+            // Clear messages from previous room
+            messages.innerHTML = '';
+
+            // Connect to new room
+            currentRoom = roomName;
+            connectToRoom(roomName);
+            
+            // Show the chat interface
+            document.querySelector('.chat').classList.remove('hidden');
+            
+            // Add room joined message
+            addMessage(`Joined room: ${roomName}`, 'system');
+        }
         </script>
     </body>
 </html>

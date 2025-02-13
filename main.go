@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"log"
@@ -9,10 +11,13 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
 	"github.com/rs/zerolog"
+	"github.com/stevenvegt/matrix-as-demo/storage"
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/appservice"
 	"maunium.net/go/mautrix/event"
@@ -20,8 +25,17 @@ import (
 )
 
 func main() {
+	db, err := sql.Open("sqlite3", "./rooms.db")
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	err := godotenv.Load()
+	roomRepository := storage.NewRoomRepository(db)
+	if err := roomRepository.InitDB(); err != nil {
+		log.Fatal(err)
+	}
+
+	err = godotenv.Load()
 	if err != nil {
 		log.Fatal("Error loading .env file")
 	}
@@ -30,9 +44,8 @@ func main() {
 	hsToken := os.Getenv("HS_TOKEN")
 	homeserverHost := os.Getenv("HOMESERVER_HOST")
 	userID := os.Getenv("USER_ID")
-	roomId := os.Getenv("ROOM_ID")
 
-	matrixMessages := make(chan string)
+	matrixMessages := make(chan Message)
 
 	opts := appservice.CreateOpts{}
 
@@ -48,11 +61,11 @@ func main() {
 		AppToken:        asToken,
 		ServerToken:     hsToken,
 		URL:             opts.HostConfig.Address(),
-		ID:              "FhirConnector",
-		SenderLocalpart: "_fhir",
+		ID:              "ASDemoConnector",
+		SenderLocalpart: "_asdemo",
 		Namespaces: appservice.Namespaces{
 			UserIDs: []appservice.Namespace{{
-				Regex:     "@_fhir.*",
+				Regex:     "@_asdemo.*",
 				Exclusive: true,
 			}},
 			RoomIDs: appservice.NamespaceList{{
@@ -85,21 +98,28 @@ func main() {
 	client := as.Client(id.UserID(userID))
 	resp, err := client.Whoami(context.Background())
 
-	mh := &MessageHandler{matrixMessages: matrixMessages, client: client, roomId: roomId}
+	mh := NewMessageHandler(matrixMessages, client, roomRepository)
 
 	ep := appservice.NewEventProcessor(as)
 	ep.On(event.EventMessage, mh.handleRoomEvent)
 	ep.On(event.EventReaction, mh.handleRoomEvent)
 	ep.On(event.EventEncrypted, mh.handleRoomEvent)
 	ep.On(event.StateMember, mh.handleRoomEvent)
-	as.Router.HandleFunc("/ws", mh.wsHandler())
-	as.Router.HandleFunc("/", indexHandler)
+	ep.On(event.StateCreate, mh.handleRoomEvent)
+	ep.On(event.StateAliases, mh.handleRoomEvent)
+	ep.On(event.StateCanonicalAlias, mh.handleRoomEvent)
+	ep.On(event.StateRoomName, mh.handleRoomEvent)
+	as.Router.HandleFunc("/ws/{roomId}", mh.wsHandler())
+	as.Router.HandleFunc("/", indexHandler(roomRepository))
+	as.Router.HandleFunc("/api/rooms", listRoomsHandler(roomRepository))
 
 	go as.Start()
 	log.Println("AppService started")
 
 	ep.Start(context.Background())
 	log.Println("EventProcessor started")
+
+	go mh.broadcastMessages()
 
 	as.Ready = true
 
@@ -114,20 +134,94 @@ func main() {
 	os.Exit(exitCode)
 }
 
+type Message struct {
+	Body   string `json:"body"`
+	User   string `json:"user"`
+	RoomID string `json:"room_id"`
+}
+
 type MessageHandler struct {
-	matrixMessages chan string
+	matrixMessages chan Message
 	client         *mautrix.Client
-	roomId         string
+	roomRepository *storage.RoomRepository
+	connections    map[string][]*websocket.Conn
+}
+
+func NewMessageHandler(matrixMessages chan Message, client *mautrix.Client, roomRepository *storage.RoomRepository) *MessageHandler {
+	return &MessageHandler{
+		matrixMessages: matrixMessages,
+		client:         client,
+		roomRepository: roomRepository,
+		connections:    make(map[string][]*websocket.Conn),
+	}
+}
+
+func listRoomsHandler(repo *storage.RoomRepository) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		rooms, err := repo.List()
+		if err != nil {
+			http.Error(w, "Failed to fetch rooms", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(rooms); err != nil {
+			http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+			return
+		}
+	}
 }
 
 func (m *MessageHandler) handleRoomEvent(ctx context.Context, ev *event.Event) {
-	log.Printf("Received room event of type: %s", ev.Type)
-	if ev.Type == event.EventMessage {
+	log.Printf("Received room event, ID: %s, of type: %s", ev.RoomID, ev.Type)
+
+	rawEvt := ev.Content.Raw
+	log.Println(rawEvt)
+
+	switch ev.Type {
+	case event.StateCreate:
+		m.roomRepository.Store(&storage.Room{
+			ID:        ev.RoomID.String(),
+			CreatedAt: time.Now(),
+		})
+	case event.StateRoomName:
+		room, err := m.roomRepository.Fetch(ev.RoomID.String())
+		if err != nil {
+			log.Printf("Error fetching room: %v", err)
+			return
+		}
+		room.Name = ev.Content.AsRoomName().Name
+		if err := m.roomRepository.Store(room); err != nil {
+			log.Printf("Error storing room: %v", err)
+		}
+	case event.EventMessage:
 		msg := ev.Content.AsMessage().Body
 		user := ev.Sender.String()
 		logLine := user + ": " + msg
 		log.Println(logLine)
-		m.matrixMessages <- logLine
+		m.matrixMessages <- Message{Body: msg, User: user, RoomID: ev.RoomID.String()}
+	}
+}
+
+func (m *MessageHandler) broadcastMessages() {
+	for msg := range m.matrixMessages {
+		payload, _ := json.Marshal(msg)
+		roomConnections, ok := m.connections[msg.RoomID]
+		if !ok {
+			log.Printf("No connections for room ID: %s", msg.RoomID)
+			continue
+		}
+		for _, conn := range roomConnections {
+			err := conn.WriteMessage(websocket.TextMessage, payload)
+			if err != nil {
+				log.Printf("Failed to write message: %v", err)
+			}
+		}
 	}
 }
 
@@ -142,6 +236,15 @@ func (m *MessageHandler) wsHandler() http.HandlerFunc {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		roomId := mux.Vars(r)["roomId"]
+		log.Printf("WS request for Room ID: %s", roomId)
+
+		if roomId == "" {
+			http.Error(w, "Room ID is required", http.StatusBadRequest)
+			log.Println("Room ID is required")
+			return
+		}
+
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			log.Printf("Failed to upgrade connection: %v", err)
@@ -149,16 +252,13 @@ func (m *MessageHandler) wsHandler() http.HandlerFunc {
 		}
 		defer conn.Close()
 
-		go func() {
-			// Keep connection alive and send messages
-			for msg := range m.matrixMessages {
-				err := conn.WriteMessage(websocket.TextMessage, []byte(msg))
-				if err != nil {
-					log.Printf("Failed to write message: %v", err)
-					return
-				}
-			}
-		}()
+		if _, ok := m.connections[roomId]; !ok {
+			m.connections[roomId] = []*websocket.Conn{conn}
+		} else {
+			m.connections[roomId] = append(m.connections[roomId], conn)
+		}
+
+		log.Printf("Connection for room ID: %s registered\n", roomId)
 
 		for {
 			_, message, err := conn.ReadMessage()
@@ -170,14 +270,33 @@ func (m *MessageHandler) wsHandler() http.HandlerFunc {
 			}
 
 			// Broadcast the message
-			m.client.SendMessageEvent(context.Background(), id.RoomID(m.roomId), event.EventMessage, event.MessageEventContent{MsgType: event.MsgText, Body: string(message)})
+			m.client.SendMessageEvent(context.Background(), id.RoomID(roomId), event.EventMessage, event.MessageEventContent{MsgType: event.MsgText, Body: string(message)})
+		}
+
+		// Remove the connection from the list
+		connections := m.connections[roomId]
+		for i, c := range connections {
+			if c == conn {
+				m.connections[roomId] = append(connections[:i], connections[i+1:]...)
+				break
+			}
 		}
 	}
 }
 
-func indexHandler(w http.ResponseWriter, r *http.Request) {
-	tmpl := template.Must(template.ParseFiles("html/index.html"))
-	tmpl.Execute(w, nil)
+func indexHandler(repo *storage.RoomRepository) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rooms, err := repo.List()
+		if err != nil {
+			http.Error(w, "Failed to fetch rooms", http.StatusInternalServerError)
+			return
+		}
+
+		tmpl := template.Must(template.ParseFiles("html/index.html"))
+		tmpl.Execute(w, map[string]interface{}{
+			"Rooms": rooms,
+		})
+	}
 }
 
 func WaitForInterrupt() int {
