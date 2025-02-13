@@ -15,7 +15,11 @@ USER_ID=@<user>:<homeserver host>
 ROOM_ID=!<room id>:<homeserver host>
 ```
 
-You can choose the tokens yourself. The user id should be an existing user on the homeserver. The room id should be an existing room on the homeserver.
+You can choose the tokens yourself.
+
+The user id should be an existing user on the homeserver.
+
+The room id should be an existing _unecrypted_ room on the homeserver.
 
 ## Run
 
